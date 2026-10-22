@@ -4,10 +4,43 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/lib/useUser";
-import { CardTile, SWATCH, type Card } from "@/components/CardTile";
+import { CardTile, CARD_COLUMNS, SWATCH, type Card } from "@/components/CardTile";
+import { OTHER_GROUP, RARITY_GROUPS, rarityGroup } from "@/lib/rarity";
 
 const PAGE_SIZE = 60;
 const NO_CARDS = new Set<string>();
+const ALL_GROUPS = [...RARITY_GROUPS, OTHER_GROUP];
+
+/**
+ * Split "snorlax 51" into a name part and a card-number part.
+ * The number token can look like 51, 051, #51, 051/165, TG05, GG01, SV049.
+ */
+function parseQuery(raw: string) {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  const isNumber = (t: string) => /^#?[A-Za-z]{0,4}\d+(\/[A-Za-z]{0,4}\d+)?$/.test(t);
+  const numberToken = [...tokens].reverse().find(isNumber);
+  const name = tokens.filter((t) => t !== numberToken).join(" ");
+
+  let localIds: string[] = [];
+  if (numberToken) {
+    const base = numberToken.replace(/^#/, "").split("/")[0].toUpperCase();
+    const m = base.match(/^([A-Z]*)(\d+)$/);
+    if (m) {
+      const [, prefix, digits] = m;
+      const n = parseInt(digits, 10);
+      // Card numbers are stored inconsistently ("51", "051", "TG05"), so try the variants
+      localIds = [
+        ...new Set([
+          `${prefix}${digits}`,
+          `${prefix}${n}`,
+          `${prefix}${String(n).padStart(2, "0")}`,
+          `${prefix}${String(n).padStart(3, "0")}`,
+        ]),
+      ];
+    }
+  }
+  return { name, localIds };
+}
 
 export default function SearchPage() {
   const router = useRouter();
@@ -15,6 +48,10 @@ export default function SearchPage() {
 
   const [query, setQuery] = useState("");
   const [color, setColor] = useState<string | null>(null);
+  const [groupKey, setGroupKey] = useState<string | null>(null);
+  // For each rarity group: the raw TCGdex rarity strings in it and the total card count
+  const [groups, setGroups] = useState<Record<string, { rarities: string[]; count: number }>>({});
+  const groupRarities = groupKey ? groups[groupKey]?.rarities ?? [] : [];
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [cards, setCards] = useState<Card[]>([]);
   const [loading, setLoading] = useState(false);
@@ -22,31 +59,52 @@ export default function SearchPage() {
   const [ownedIds, setOwnedIds] = useState<Set<string>>(NO_CARDS);
   const owned = user ? ownedIds : NO_CARDS;
 
-  // Re-run the search 300ms after the user stops typing, picks a color, or loads more
+  // Load every rarity in the database and sort it into collector-friendly groups
+  useEffect(() => {
+    supabase.rpc("card_rarities").then(({ data, error }) => {
+      if (error || !data) return;
+      const next: Record<string, { rarities: string[]; count: number }> = {};
+      for (const { rarity, count } of data as { rarity: string; count: number }[]) {
+        const key = rarityGroup(rarity).key;
+        next[key] ??= { rarities: [], count: 0 };
+        next[key].rarities.push(rarity);
+        next[key].count += Number(count);
+      }
+      setGroups(next);
+    });
+  }, []);
+
+  // Re-run the search 300ms after any filter changes
   useEffect(() => {
     const timer = setTimeout(async () => {
       setLoading(true);
       setError(null);
 
+      const { name, localIds } = parseQuery(query);
+
       let q = supabase
         .from("cards")
-        .select("id, name, set_name, local_id, rarity, image_url, colors")
+        .select(CARD_COLUMNS)
         .order("name")
         .order("set_name")
         .order("local_id")
         .limit(limit);
 
-      if (query.trim()) q = q.ilike("name", `%${query.trim()}%`);
+      if (name) q = q.ilike("name", `%${name}%`);
+      if (localIds.length) q = q.in("local_id", localIds);
+      if (groupKey) q = q.in("rarity", groupRarities);
       if (color) q = q.contains("colors", [color]);
 
       const { data, error } = await q;
       if (error) setError(error.message);
-      else setCards(data ?? []);
+      else setCards((data ?? []) as Card[]);
       setLoading(false);
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [query, color, limit]);
+    // groupRarities is derived from groupKey + groups
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, color, groupKey, groups, limit]);
 
   // Which cards the signed-in user already owns
   useEffect(() => {
@@ -83,6 +141,8 @@ export default function SearchPage() {
     }
   }
 
+  const hasFilters = query || color || groupKey;
+
   return (
     <main className="mx-auto max-w-6xl p-6">
       <h1 className="mb-4 text-3xl font-bold">Find cards</h1>
@@ -93,11 +153,32 @@ export default function SearchPage() {
           setQuery(e.target.value);
           setLimit(PAGE_SIZE);
         }}
-        placeholder="Search by name, e.g. Giratina"
+        placeholder="Name and/or number, e.g. Snorlax 51 or Giratina TG05"
         className="mb-4 w-full rounded-lg border border-gray-300 px-4 py-2 text-black"
       />
 
-      <div className="mb-6 flex flex-wrap gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-sm text-gray-500">Rarity</span>
+        {ALL_GROUPS.filter((g) => groups[g.key]).map((g) => (
+          <button
+            key={g.key}
+            onClick={() => {
+              setGroupKey(groupKey === g.key ? null : g.key);
+              setLimit(PAGE_SIZE);
+            }}
+            title={groups[g.key].rarities.join(", ")}
+            className={`rounded-full border px-3 py-1 text-sm ${
+              groupKey === g.key ? "text-white" : "border-gray-500"
+            }`}
+            style={groupKey === g.key ? { background: g.color, borderColor: g.color } : undefined}
+          >
+            {g.label} <span className="opacity-60">{groups[g.key].count}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="mb-6 flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-sm text-gray-500">Color</span>
         {Object.entries(SWATCH).map(([name, hex]) => (
           <button
             key={name}
@@ -113,6 +194,19 @@ export default function SearchPage() {
             {name}
           </button>
         ))}
+        {hasFilters && (
+          <button
+            onClick={() => {
+              setQuery("");
+              setColor(null);
+              setGroupKey(null);
+              setLimit(PAGE_SIZE);
+            }}
+            className="ml-2 text-sm underline"
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       {error && <p className="text-red-500">{error}</p>}

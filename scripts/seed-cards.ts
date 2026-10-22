@@ -5,6 +5,7 @@
  *   npx tsx scripts/seed-cards.ts <setId> [setId…]  # seed specific sets
  *   npx tsx scripts/seed-cards.ts --all             # every physical set (resumable)
  *   npx tsx scripts/seed-cards.ts --missing         # retry sets with cards lacking images
+ *   npx tsx scripts/seed-cards.ts --sets-meta       # fill series / set size / release date
  *
  * Needs NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local.
  * Safe to re-run: rows are upserted by card id.
@@ -29,7 +30,23 @@ const supabase = createClient(
 // ---------- TCGdex types (only the fields we use) ----------
 type SetBrief = { id: string; name: string; cardCount?: { total: number } };
 type CardBrief = { id: string; localId: string; name: string; image?: string };
-type SetDetail = { id: string; name: string; cards: CardBrief[] };
+type SetDetail = {
+  id: string;
+  name: string;
+  cards: CardBrief[];
+  serie?: { id: string; name: string };
+  cardCount?: { total: number; official: number };
+  releaseDate?: string;
+};
+
+/** Set-level info stored on every card row: series, printed set size, release date. */
+function setMeta(set: SetDetail) {
+  return {
+    series: set.serie?.name ?? null,
+    set_total: set.cardCount?.official || null,
+    set_release_date: set.releaseDate ?? null,
+  };
+}
 type CardDetail = {
   id: string;
   localId: string;
@@ -222,6 +239,7 @@ async function seedSet(setId: string) {
         name: card.name,
         set_id: card.set.id,
         set_name: card.set.name,
+        ...setMeta(set),
         local_id: card.localId,
         rarity: card.rarity ?? null,
         illustrator: card.illustrator ?? null,
@@ -316,10 +334,32 @@ async function seedMissing() {
   }
 }
 
+/**
+ * Fill series / set_total / set_release_date for cards already in the database,
+ * without re-downloading any images. One request per set.
+ */
+async function updateSetMeta() {
+  const sets = (await getJSON<SetBrief[]>(`${API}/sets`)).filter((s) => !isPocketSet(s.id));
+  for (const [i, s] of sets.entries()) {
+    try {
+      const detail = await getJSON<SetDetail>(`${API}/sets/${encodeURIComponent(s.id)}`);
+      const { error } = await supabase.from("cards").update(setMeta(detail)).eq("set_id", s.id);
+      if (error) throw new Error(error.message);
+      console.log(`[${i + 1}/${sets.length}] ${s.id}: ${detail.serie?.name ?? "?"}`);
+    } catch (err) {
+      console.warn(`✗ ${s.id}: ${(err as Error).message}`);
+    }
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 0 || args[0] === "--list") {
     await listSets();
+    return;
+  }
+  if (args[0] === "--sets-meta") {
+    await updateSetMeta();
     return;
   }
   if (args[0] === "--missing") {

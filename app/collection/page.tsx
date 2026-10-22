@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { useUser } from "@/lib/useUser";
-import { CardTile, type Card } from "@/components/CardTile";
+import { CardTile, CARD_COLUMNS, type Card } from "@/components/CardTile";
 
 export default function CollectionPage() {
   const { user, loading: userLoading } = useUser();
@@ -15,7 +15,7 @@ export default function CollectionPage() {
     if (!user) return;
     supabase
       .from("user_cards")
-      .select("added_at, cards(id, name, set_name, local_id, rarity, image_url, colors)")
+      .select(`added_at, cards(${CARD_COLUMNS})`)
       .order("added_at", { ascending: false })
       .then(({ data, error }) => {
         if (error) return setError(error.message);
