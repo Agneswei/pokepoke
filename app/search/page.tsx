@@ -1,43 +1,26 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { cardImage } from "@/lib/cardImage";
-
-type Card = {
-  id: string;
-  name: string;
-  set_name: string | null;
-  local_id: string | null;
-  rarity: string | null;
-  image_url: string | null;
-  colors: string[];
-};
+import { useUser } from "@/lib/useUser";
+import { CardTile, SWATCH, type Card } from "@/components/CardTile";
 
 const PAGE_SIZE = 60;
-
-const SWATCH: Record<string, string> = {
-  red: "#e53935",
-  orange: "#fb8c00",
-  yellow: "#fdd835",
-  green: "#43a047",
-  teal: "#00897b",
-  blue: "#1e88e5",
-  purple: "#8e24aa",
-  pink: "#ec407a",
-  brown: "#795548",
-  black: "#212121",
-  white: "#f5f5f5",
-  gray: "#9e9e9e",
-};
+const NO_CARDS = new Set<string>();
 
 export default function SearchPage() {
+  const router = useRouter();
+  const { user } = useUser();
+
   const [query, setQuery] = useState("");
   const [color, setColor] = useState<string | null>(null);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [cards, setCards] = useState<Card[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ownedIds, setOwnedIds] = useState<Set<string>>(NO_CARDS);
+  const owned = user ? ownedIds : NO_CARDS;
 
   // Re-run the search 300ms after the user stops typing, picks a color, or loads more
   useEffect(() => {
@@ -64,6 +47,41 @@ export default function SearchPage() {
 
     return () => clearTimeout(timer);
   }, [query, color, limit]);
+
+  // Which cards the signed-in user already owns
+  useEffect(() => {
+    if (!user) return;
+    supabase
+      .from("user_cards")
+      .select("card_id")
+      .then(({ data }) => setOwnedIds(new Set((data ?? []).map((r) => r.card_id as string))));
+  }, [user]);
+
+  async function toggleOwned(cardId: string) {
+    if (!user) {
+      router.push("/login");
+      return;
+    }
+    if (owned.has(cardId)) {
+      const { error } = await supabase
+        .from("user_cards")
+        .delete()
+        .eq("user_id", user.id)
+        .eq("card_id", cardId);
+      if (error) return setError(error.message);
+      setOwnedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(cardId);
+        return next;
+      });
+    } else {
+      const { error } = await supabase
+        .from("user_cards")
+        .insert({ user_id: user.id, card_id: cardId });
+      if (error) return setError(error.message);
+      setOwnedIds((prev) => new Set(prev).add(cardId));
+    }
+  }
 
   return (
     <main className="mx-auto max-w-6xl p-6">
@@ -102,38 +120,27 @@ export default function SearchPage() {
       {!loading && cards.length === 0 && <p className="text-gray-400">No cards found.</p>}
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 md:grid-cols-6">
-        {cards.map((card) => (
-          <div key={card.id}>
-            {card.image_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={cardImage(card.image_url)!}
-                alt={card.name}
-                loading="lazy"
-                className="aspect-[63/88] w-full rounded-lg object-cover"
-              />
-            ) : (
-              <div className="flex aspect-[63/88] w-full flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-400 p-2 text-center">
-                <p className="text-sm font-medium">{card.name}</p>
-                <p className="mt-1 text-xs text-gray-400">Image coming soon</p>
-              </div>
-            )}
-            <p className="mt-1 truncate text-sm font-medium">{card.name}</p>
-            <p className="truncate text-xs text-gray-400">
-              {card.set_name} · {card.local_id}
-            </p>
-            <div className="mt-1 flex gap-1">
-              {card.colors.map((c) => (
-                <span
-                  key={c}
-                  title={c}
-                  className="h-3 w-3 rounded-full border border-gray-600"
-                  style={{ background: SWATCH[c] }}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
+        {cards.map((card) => {
+          const isOwned = owned.has(card.id);
+          return (
+            <CardTile
+              key={card.id}
+              card={card}
+              action={
+                <button
+                  onClick={() => toggleOwned(card.id)}
+                  className={`w-full rounded-md px-2 py-1 text-xs font-medium ${
+                    isOwned
+                      ? "bg-green-600 text-white"
+                      : "border border-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  }`}
+                >
+                  {isOwned ? "✓ In collection" : "+ Add"}
+                </button>
+              }
+            />
+          );
+        })}
       </div>
 
       {cards.length === limit && (
